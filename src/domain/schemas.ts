@@ -29,7 +29,17 @@ export const courseSchema = z.object({
   corequisitesText: z.string().optional(),
   designation: z.string().optional(),
   source: z.enum(["seed", "sfu", "manual"]),
-  historicalOfferings: z.array(termIdSchema)
+  historicalOfferings: z.array(termIdSchema),
+  lastFetchedAt: z.string().optional()
+});
+
+export const courseInstructorSchema = z.object({
+  name: z.string(),
+  roleCode: z.string().optional(),
+  email: z.string().optional(),
+  profileUrl: z.string().optional(),
+  office: z.string().optional(),
+  officeHours: z.string().optional()
 });
 
 export const courseSectionSchema = z.object({
@@ -41,7 +51,9 @@ export const courseSectionSchema = z.object({
   classType: z.enum(["enrollment", "non_enrollment", "unknown"]),
   sectionCode: z.string().optional(),
   associatedClass: z.string().optional(),
+  instructors: z.array(courseInstructorSchema).optional(),
   meetings: z.array(sectionMeetingSchema),
+  lastFetchedAt: z.string().optional(),
   raw: z.unknown().optional()
 });
 

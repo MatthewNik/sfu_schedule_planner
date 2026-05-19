@@ -10,14 +10,17 @@ import {
   Download,
   GraduationCap,
   GripVertical,
+  Info,
   Pencil,
   Plus,
   Search,
   Trash2,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { getAvailabilityConfidence, getCourse, getPlannedCoursesForTerm } from "./domain/course-utils";
+import { buildCourseDetailModel, historicalTermsFor, isOfficialSection, type CourseDetailModel } from "./domain/course-details";
 import {
   createPlaceholderCourse,
   extractCourseCodesFromPlainText,
@@ -104,6 +107,18 @@ function mergeCourse(existing: Course | undefined, incoming: Course): Course {
     ...incoming,
     historicalOfferings: [...new Set([...existing.historicalOfferings, ...incoming.historicalOfferings])]
   };
+}
+
+function mergeSections(existing: CourseSection[], incoming: CourseSection[]): CourseSection[] {
+  const byId = new Map(existing.map((section) => [section.id, section]));
+  incoming.forEach((section) => {
+    byId.set(section.id, section);
+  });
+  return [...byId.values()].sort((left, right) =>
+    left.courseId.localeCompare(right.courseId) ||
+    compareTermIds(left.termId, right.termId) ||
+    left.label.localeCompare(right.label)
+  );
 }
 
 function sfuCourseNumber(item: SfuListItem): string | undefined {
@@ -194,13 +209,19 @@ function DraggableCourseCard({
   planned,
   course,
   terms,
+  sections,
   onMove,
+  onSelectSection,
+  onOpenDetails,
   onRemove
 }: {
   planned: PlannedCourse;
   course?: Course;
   terms: DegreeTerm[];
+  sections: CourseSection[];
   onMove: (termId: TermId) => void;
+  onSelectSection: (sectionId: string) => void;
+  onOpenDetails: () => void;
   onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -215,12 +236,21 @@ function DraggableCourseCard({
       ref={setNodeRef}
       style={style}
       className={classNames("course-card", isDragging && "dragging")}
+      onClick={onOpenDetails}
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpenDetails();
+        }
+      }}
     >
       <div className="course-card-topline">
         <button
           type="button"
           className="drag-handle"
           aria-label={`Drag ${planned.courseId}`}
+          onClick={(event) => event.stopPropagation()}
           {...listeners}
           {...attributes}
         >
@@ -238,6 +268,7 @@ function DraggableCourseCard({
             aria-label={`Move ${planned.courseId} To Term`}
             value={planned.termId}
             onChange={(event) => onMove(event.target.value as TermId)}
+            onClick={(event) => event.stopPropagation()}
           >
             {terms.map((term) => (
               <option key={term.id} value={term.id}>
@@ -247,7 +278,44 @@ function DraggableCourseCard({
           </select>
           <ChevronDown size={15} aria-hidden="true" />
         </span>
-        <button type="button" className="icon-button subtle" onClick={onRemove} aria-label="Remove Course">
+        {sections.length ? (
+          <span className="select-wrap">
+            <select
+              aria-label={`Select ${planned.courseId} Section`}
+              value={planned.selectedSectionIds[0] ?? ""}
+              onChange={(event) => onSelectSection(event.target.value)}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <option value="">No Section</option>
+              {sections.map((section) => (
+                <option key={section.id} value={section.id}>
+                  {section.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown size={15} aria-hidden="true" />
+          </span>
+        ) : null}
+        <button
+          type="button"
+          className="icon-button subtle"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenDetails();
+          }}
+          aria-label={`Show ${planned.courseId} Details`}
+        >
+          <Info size={15} />
+        </button>
+        <button
+          type="button"
+          className="icon-button subtle"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+          aria-label="Remove Course"
+        >
           <Trash2 size={15} />
         </button>
       </div>
@@ -262,6 +330,8 @@ function TermColumn({
   plannedCourses,
   onRemoveCourse,
   onMoveCourse,
+  onSelectSection,
+  onOpenCourseDetails,
   previewCourse,
   previewPlacement,
   onPlacePreview,
@@ -273,6 +343,8 @@ function TermColumn({
   plannedCourses: PlannedCourse[];
   onRemoveCourse: (plannedCourseId: string) => void;
   onMoveCourse: (plannedCourseId: string, toTermId: TermId) => void;
+  onSelectSection: (plannedCourseId: string, termId: TermId, sectionId: string) => void;
+  onOpenCourseDetails: (planned: PlannedCourse) => void;
   previewCourse?: Course;
   previewPlacement?: ReturnType<typeof getPossiblePlacements>[number];
   onPlacePreview: (courseId: string, termId: TermId) => void;
@@ -327,7 +399,12 @@ function TermColumn({
             planned={planned}
             course={getCourse(data.courses, planned.courseId)}
             terms={terms}
+            sections={data.sections.filter(
+              (section) => section.courseId === planned.courseId && section.termId === planned.termId && isOfficialSection(section)
+            )}
             onMove={(termId) => onMoveCourse(planned.id, termId)}
+            onSelectSection={(sectionId) => onSelectSection(planned.id, planned.termId, sectionId)}
+            onOpenDetails={() => onOpenCourseDetails(planned)}
             onRemove={() => onRemoveCourse(planned.id)}
           />
         ))}
@@ -336,6 +413,165 @@ function TermColumn({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function formatFetchedAt(value?: string): string {
+  if (!value) {
+    return "Not checked yet";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(new Date(value));
+}
+
+function formatDays(days: Weekday[]): string {
+  return days.length ? days.join(", ") : "Days TBA";
+}
+
+function sourceLabel(detail: CourseDetailModel | undefined): string {
+  if (!detail) {
+    return "Cached local data";
+  }
+  if (detail.source === "official") {
+    return "Official SFU data";
+  }
+  if (detail.source === "fallback") {
+    return "Historical SFU fallback";
+  }
+  return "Cached local data";
+}
+
+function CourseDetailPanel({
+  planned,
+  course,
+  detail,
+  loading,
+  error,
+  onClose,
+  onSelectSection
+}: {
+  planned?: PlannedCourse;
+  course?: Course;
+  detail?: CourseDetailModel;
+  loading: boolean;
+  error: string;
+  onClose: () => void;
+  onSelectSection: (sectionId: string) => void;
+}) {
+  if (!planned) {
+    return null;
+  }
+
+  const confirmedSections = detail?.confirmedSections ?? [];
+  const selectedSectionId = planned.selectedSectionIds[0] ?? "";
+
+  return (
+    <aside className="course-detail-panel" aria-label="Course Details">
+      <header className="course-detail-header">
+        <div>
+          <p>{sourceLabel(detail)}</p>
+          <h2>{course?.id ?? planned.courseId}</h2>
+          <span>{course?.title ?? "Unknown Course"}</span>
+        </div>
+        <button type="button" className="icon-button subtle" onClick={onClose} aria-label="Close Course Details">
+          <X size={17} />
+        </button>
+      </header>
+
+      <div className="course-detail-trust">
+        <span>{course?.units ?? 0} credits</span>
+        <span>Fetched: {formatFetchedAt(detail?.lastFetchedAt)}</span>
+      </div>
+
+      {loading ? <p className="detail-status">Checking Official SFU Course Outlines...</p> : null}
+      {error ? <p className="detail-error">{error}</p> : null}
+
+      <section className="detail-section">
+        <h3>Description</h3>
+        <p>{course?.description || "No course description is available in the local planner yet."}</p>
+      </section>
+
+      <section className="detail-section">
+        <h3>Prerequisites</h3>
+        <p>{course?.prerequisitesText || "No prerequisites listed."}</p>
+      </section>
+
+      {course?.corequisitesText ? (
+        <section className="detail-section">
+          <h3>Corequisites</h3>
+          <p>{course.corequisitesText}</p>
+        </section>
+      ) : null}
+
+      <section className="detail-section">
+        <h3>Sections</h3>
+        {confirmedSections.length ? (
+          <>
+            <label className="stacked-field">
+              Selected Section
+              <select value={selectedSectionId} onChange={(event) => onSelectSection(event.target.value)}>
+                <option value="">No Section Selected</option>
+                {confirmedSections.map((section) => (
+                  <option key={section.id} value={section.id}>
+                    {section.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="detail-section-list">
+              {confirmedSections.map((section) => (
+                <article key={section.id} className={classNames("detail-section-card", selectedSectionId === section.id && "active")}>
+                  <div>
+                    <strong>{section.label}</strong>
+                    <span>{section.sectionCode ?? "Section"}</span>
+                  </div>
+                  <p>
+                    {(section.instructors ?? []).map((instructor) => instructor.name).join(", ") || "Instructor TBA"}
+                  </p>
+                  {section.meetings.length ? (
+                    <ul>
+                      {section.meetings.map((meeting) => (
+                        <li key={meeting.id}>
+                          {formatDays(meeting.days)} {meeting.startTime}-{meeting.endTime}
+                          {meeting.campus ? `, ${meeting.campus}` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>Day/time TBA</p>
+                  )}
+                </article>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p>No official section data posted for {termLabel(planned.termId)} yet.</p>
+        )}
+      </section>
+
+      {!confirmedSections.length ? (
+        <section className="detail-section">
+          <h3>Historical Context</h3>
+          {detail?.pastInstructors.length ? (
+            <div className="past-instructor-list">
+              {detail.pastInstructors.map((instructor) => (
+                <p key={`${instructor.name}-${instructor.email ?? ""}`}>
+                  <strong>{instructor.name}</strong>
+                  <span>{instructor.terms.map(termLabel).join(", ")}</span>
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p>No past instructor data found in the last 3 years.</p>
+          )}
+          {detail?.historicalOfferings.length ? (
+            <p>Known offerings: {detail.historicalOfferings.map(termLabel).join(", ")}</p>
+          ) : null}
+        </section>
+      ) : null}
+    </aside>
   );
 }
 
@@ -353,8 +589,12 @@ export default function App() {
   const [remainingPasteText, setRemainingPasteText] = useState("");
   const [editingPlanName, setEditingPlanName] = useState(false);
   const [importError, setImportError] = useState("");
+  const [selectedDetailPlannedCourseId, setSelectedDetailPlannedCourseId] = useState<string | null>(null);
+  const [courseDetailLoadingKey, setCourseDetailLoadingKey] = useState<string | null>(null);
+  const [courseDetailError, setCourseDetailError] = useState("");
   const didLoad = useRef(false);
   const fetchedCatalogKeys = useRef(new Set<string>());
+  const fetchedDetailKeys = useRef(new Set<string>());
   const plannerComboboxRef = useRef<HTMLDivElement>(null);
   const completedComboboxRef = useRef<HTMLDivElement>(null);
   const remainingComboboxRef = useRef<HTMLDivElement>(null);
@@ -539,6 +779,85 @@ export default function App() {
         candidate.id === plan.id ? updater(candidate) : candidate
       )
     }));
+  }
+
+  async function fetchOfficialCourseDetails(planned: PlannedCourse, force = false) {
+    const course = getCourse(currentData.courses, planned.courseId);
+    const subject = course?.subject ?? planned.courseId.split(/\s+/)[0];
+    const number = course?.number ?? planned.courseId.split(/\s+/)[1];
+    const target = parseTermId(planned.termId);
+    const cacheKey = `${planned.courseId}|${planned.termId}`;
+
+    if (!subject || !number || (!force && fetchedDetailKeys.current.has(cacheKey))) {
+      return;
+    }
+
+    setCourseDetailLoadingKey(cacheKey);
+    setCourseDetailError("");
+
+    try {
+      let currentTermResult: { course?: Course; sections: CourseSection[] } = { sections: [] };
+      let currentTermError: unknown;
+      try {
+        currentTermResult = await fetchSfuCourseWithSections(target.year, target.season, subject, number);
+      } catch (error) {
+        currentTermError = error;
+      }
+
+      const historicalResults = currentTermResult.sections.length
+        ? []
+        : await Promise.allSettled(
+            historicalTermsFor(planned.termId).map((term) =>
+              fetchSfuCourseWithSections(term.year, term.season, subject, number)
+            )
+          );
+      const fulfilledHistorical = historicalResults.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : []
+      );
+      const courses = [currentTermResult.course, ...fulfilledHistorical.map((result) => result.course)]
+        .filter((candidate): candidate is Course => Boolean(candidate));
+      const sections = [
+        ...currentTermResult.sections,
+        ...fulfilledHistorical.flatMap((result) => result.sections)
+      ];
+
+      if (courses.length || sections.length) {
+        setData((current) => {
+          if (!current) {
+            return current;
+          }
+
+          const byId = new Map(current.courses.map((candidate) => [candidate.id, candidate]));
+          courses.forEach((candidate) => {
+            byId.set(candidate.id, mergeCourse(byId.get(candidate.id), candidate));
+          });
+
+          return {
+            ...current,
+            courses: [...byId.values()].sort((left, right) => left.id.localeCompare(right.id)),
+            sections: mergeSections(current.sections, sections)
+          };
+        });
+      }
+
+      if (!courses.length && !sections.length && currentTermError) {
+        setCourseDetailError(
+          currentTermError instanceof Error
+            ? currentTermError.message
+            : "Unable to fetch official SFU course details."
+        );
+      }
+      fetchedDetailKeys.current.add(cacheKey);
+    } catch (error) {
+      setCourseDetailError(error instanceof Error ? error.message : "Unable to fetch official SFU course details.");
+    } finally {
+      setCourseDetailLoadingKey((current) => (current === cacheKey ? null : current));
+    }
+  }
+
+  function openCourseDetails(planned: PlannedCourse) {
+    setSelectedDetailPlannedCourseId(planned.id);
+    void fetchOfficialCourseDetails(planned);
   }
 
   function updateTerm(termId: TermId, patch: Partial<DegreeTerm>) {
@@ -928,16 +1247,41 @@ export default function App() {
     }));
   }
 
-  function selectSection(plannedCourseId: string, sectionId: string) {
-    const schedule = ensureSchedule(selectedTerm.id);
-    updateSchedule(schedule.id, {
-      selectedSectionIdsByPlannedCourseId: {
-        ...schedule.selectedSectionIdsByPlannedCourseId,
-        [plannedCourseId]: sectionId ? [sectionId] : []
-      }
-    });
+  function selectSectionForTerm(plannedCourseId: string, termId: TermId, sectionId: string) {
     patchActivePlan((currentPlan) => ({
       ...currentPlan,
+      semesterSchedules: (() => {
+        const existing = activeSchedule(currentPlan, termId);
+        const updatedSelections = {
+          ...(existing?.selectedSectionIdsByPlannedCourseId ?? {}),
+          [plannedCourseId]: sectionId ? [sectionId] : []
+        };
+        if (existing) {
+          return currentPlan.semesterSchedules.map((schedule) =>
+            schedule.id === existing.id
+              ? { ...schedule, selectedSectionIdsByPlannedCourseId: updatedSelections, updatedAt: nowIso() }
+              : schedule
+          );
+        }
+
+        const createdAt = nowIso();
+        const created: SemesterScheduleVersion = {
+          id: createId("schedule"),
+          termId,
+          name: `${termLabel(termId)} Schedule A`,
+          active: true,
+          createdAt,
+          updatedAt: createdAt,
+          selectedSectionIdsByPlannedCourseId: updatedSelections
+        };
+
+        return [
+          ...currentPlan.semesterSchedules.map((schedule) =>
+            schedule.termId === termId ? { ...schedule, active: false } : schedule
+          ),
+          created
+        ];
+      })(),
       degreePlan: {
         ...currentPlan.degreePlan,
         plannedCourses: currentPlan.degreePlan.plannedCourses.map((planned) =>
@@ -947,6 +1291,10 @@ export default function App() {
         )
       }
     }));
+  }
+
+  function selectSection(plannedCourseId: string, sectionId: string) {
+    selectSectionForTerm(plannedCourseId, selectedTerm.id, sectionId);
   }
 
   function exportJson() {
@@ -1012,6 +1360,18 @@ export default function App() {
       }
     }))
   );
+  const selectedDetailPlannedCourse = selectedDetailPlannedCourseId
+    ? plan.degreePlan.plannedCourses.find((planned) => planned.id === selectedDetailPlannedCourseId)
+    : undefined;
+  const selectedDetailCourse = selectedDetailPlannedCourse
+    ? getCourse(data.courses, selectedDetailPlannedCourse.courseId)
+    : undefined;
+  const selectedDetailModel = selectedDetailPlannedCourse
+    ? buildCourseDetailModel(data, selectedDetailPlannedCourse)
+    : undefined;
+  const selectedDetailLoadingKey = selectedDetailPlannedCourse
+    ? `${selectedDetailPlannedCourse.courseId}|${selectedDetailPlannedCourse.termId}`
+    : null;
 
   return (
     <main className="app-shell">
@@ -1230,6 +1590,8 @@ export default function App() {
                     plannedCourses={getPlannedCoursesForTerm(plan.degreePlan.plannedCourses, term)}
                     onRemoveCourse={removePlannedCourse}
                     onMoveCourse={movePlannedCourse}
+                    onSelectSection={selectSectionForTerm}
+                    onOpenCourseDetails={openCourseDetails}
                     previewCourse={previewCourse}
                     previewPlacement={previewPlacements.find((placement) => placement.termId === term.id)}
                     onPlacePreview={addCourseToTerm}
@@ -1495,6 +1857,22 @@ export default function App() {
         ) : null}
 
       </section>
+      <CourseDetailPanel
+        planned={selectedDetailPlannedCourse}
+        course={selectedDetailCourse}
+        detail={selectedDetailModel}
+        loading={courseDetailLoadingKey === selectedDetailLoadingKey}
+        error={courseDetailError}
+        onClose={() => {
+          setSelectedDetailPlannedCourseId(null);
+          setCourseDetailError("");
+        }}
+        onSelectSection={(sectionId) => {
+          if (selectedDetailPlannedCourse) {
+            selectSectionForTerm(selectedDetailPlannedCourse.id, selectedDetailPlannedCourse.termId, sectionId);
+          }
+        }}
+      />
     </main>
   );
 }

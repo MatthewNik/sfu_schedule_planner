@@ -17,6 +17,16 @@ export interface Course {
   designation?: string;
   source: "seed" | "sfu" | "manual";
   historicalOfferings: TermId[];
+  lastFetchedAt?: string;
+}
+
+export interface CourseInstructor {
+  name: string;
+  roleCode?: string;
+  email?: string;
+  profileUrl?: string;
+  office?: string;
+  officeHours?: string;
 }
 
 export interface CourseSection {
@@ -28,7 +38,9 @@ export interface CourseSection {
   classType: "enrollment" | "non_enrollment" | "unknown";
   sectionCode?: string;
   associatedClass?: string;
+  instructors?: CourseInstructor[];
   meetings: SectionMeeting[];
+  lastFetchedAt?: string;
   raw?: unknown;
 }
 

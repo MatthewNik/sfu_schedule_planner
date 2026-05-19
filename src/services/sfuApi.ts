@@ -1,5 +1,5 @@
 import { normalizeCourseId, parseDays } from "../domain/course-utils";
-import type { Course, CourseSection, SectionMeeting, TermId, TermSeason } from "../domain/types";
+import type { Course, CourseInstructor, CourseSection, SectionMeeting, TermId, TermSeason } from "../domain/types";
 
 const DEFAULT_SFU_API_BASE_URL = "https://www.sfu.ca/bin/wcm/course-outlines";
 export const SFU_API_BASE_URL =
@@ -15,6 +15,7 @@ export interface SfuListItem {
 }
 
 interface SfuOutline {
+  info?: SfuOutlineInfo;
   title?: string;
   prerequisites?: string;
   corequisites?: string;
@@ -27,10 +28,39 @@ interface SfuOutline {
   term?: string;
   name?: string;
   classNumber?: string;
+  instructor?: SfuInstructor[] | SfuInstructor;
   courseSchedule?: SfuScheduleItem[];
   examSchedule?: SfuScheduleItem[];
   schedule?: SfuScheduleItem[];
   [key: string]: unknown;
+}
+
+interface SfuOutlineInfo {
+  title?: string;
+  prerequisites?: string;
+  corequisites?: string;
+  designation?: string;
+  description?: string;
+  dept?: string;
+  number?: string;
+  units?: string | number;
+  section?: string;
+  term?: string;
+  name?: string;
+  classNumber?: string;
+  [key: string]: unknown;
+}
+
+interface SfuInstructor {
+  name?: string;
+  roleCode?: string;
+  email?: string;
+  profileUrl?: string;
+  office?: string;
+  officeHours?: string;
+  commonName?: string;
+  firstName?: string;
+  lastName?: string;
 }
 
 interface SfuScheduleItem {
@@ -96,6 +126,35 @@ export async function getSfuOutline(
   return fetchJson<SfuOutline>(apiUrl([String(year), term, department, courseNumber, section]));
 }
 
+function outlineInfo(outline: SfuOutline): SfuOutlineInfo {
+  return outline.info ?? outline;
+}
+
+function instructorsFromOutline(outline: SfuOutline): CourseInstructor[] {
+  const raw = Array.isArray(outline.instructor)
+    ? outline.instructor
+    : outline.instructor
+      ? [outline.instructor]
+      : [];
+
+  return raw
+    .map((instructor): CourseInstructor | undefined => {
+      const name = instructor.name?.trim() || [instructor.firstName, instructor.lastName].filter(Boolean).join(" ").trim();
+      if (!name) {
+        return undefined;
+      }
+
+      const normalized: CourseInstructor = { name };
+      if (instructor.roleCode) normalized.roleCode = instructor.roleCode;
+      if (instructor.email) normalized.email = instructor.email;
+      if (instructor.profileUrl) normalized.profileUrl = instructor.profileUrl;
+      if (instructor.office) normalized.office = instructor.office;
+      if (instructor.officeHours) normalized.officeHours = instructor.officeHours;
+      return normalized;
+    })
+    .filter((instructor): instructor is CourseInstructor => Boolean(instructor));
+}
+
 function normalizedMeetings(outline: SfuOutline, sectionId: string): SectionMeeting[] {
   const scheduleItems = [
     ...(Array.isArray(outline.courseSchedule) ? outline.courseSchedule : []),
@@ -113,36 +172,46 @@ function normalizedMeetings(outline: SfuOutline, sectionId: string): SectionMeet
   }));
 }
 
-function courseFromOutline(outline: SfuOutline, department: string, courseNumber: string, termId: TermId): Course {
-  const subject = (outline.dept ?? department).toUpperCase();
-  const number = (outline.number ?? courseNumber).toUpperCase();
+export function courseFromOutline(
+  outline: SfuOutline,
+  department: string,
+  courseNumber: string,
+  termId: TermId,
+  fetchedAt = new Date().toISOString()
+): Course {
+  const info = outlineInfo(outline);
+  const subject = (info.dept ?? department).toUpperCase();
+  const number = (info.number ?? courseNumber).toUpperCase();
   const id = normalizeCourseId(subject, number);
 
   return {
     id,
     subject,
     number,
-    title: outline.title ?? outline.name ?? id,
-    units: Number(outline.units ?? 3) || 3,
-    description: outline.description,
-    prerequisitesText: outline.prerequisites,
-    corequisitesText: outline.corequisites,
-    designation: outline.designation,
+    title: info.title ?? info.name ?? id,
+    units: Number(info.units ?? 3) || 3,
+    description: info.description,
+    prerequisitesText: info.prerequisites,
+    corequisitesText: info.corequisites,
+    designation: info.designation,
     source: "sfu",
-    historicalOfferings: [termId]
+    historicalOfferings: [termId],
+    lastFetchedAt: fetchedAt
   };
 }
 
-function sectionFromOutline(
+export function sectionFromOutline(
   outline: SfuOutline,
   year: number,
   term: TermSeason,
   department: string,
   courseNumber: string,
-  fallback: SfuListItem
+  fallback: SfuListItem,
+  fetchedAt = new Date().toISOString()
 ): CourseSection {
+  const info = outlineInfo(outline);
   const courseId = normalizeCourseId(department, courseNumber);
-  const label = (outline.section ?? fallback.value ?? fallback.text ?? "unknown").toUpperCase();
+  const label = (info.section ?? fallback.value ?? fallback.text ?? "unknown").toUpperCase();
   const termId = `${year}-${term}` as TermId;
   const id = `${courseId}-${termId}-${label}`;
 
@@ -151,7 +220,7 @@ function sectionFromOutline(
     courseId,
     termId,
     label,
-    title: outline.title ?? fallback.title ?? courseId,
+    title: info.title ?? fallback.title ?? courseId,
     classType:
       fallback.classType === "e"
         ? "enrollment"
@@ -160,7 +229,9 @@ function sectionFromOutline(
           : "unknown",
     sectionCode: fallback.sectionCode,
     associatedClass: fallback.associatedClass,
+    instructors: instructorsFromOutline(outline),
     meetings: normalizedMeetings(outline, id),
+    lastFetchedAt: fetchedAt,
     raw: outline
   };
 }
@@ -171,6 +242,7 @@ export async function fetchSfuCourseWithSections(
   department: string,
   courseNumber: string
 ): Promise<{ course?: Course; sections: CourseSection[] }> {
+  const fetchedAt = new Date().toISOString();
   const sectionItems = await getSfuSections(year, term, department, courseNumber);
   const enrollmentSections = sectionItems.filter((section) => section.value && section.classType !== "n");
   const outlines = await Promise.allSettled(
@@ -188,9 +260,9 @@ export async function fetchSfuCourseWithSections(
 
   const firstOutline = fulfilled[0]?.result.value;
   return {
-    course: firstOutline ? courseFromOutline(firstOutline, department, courseNumber, termId) : undefined,
+    course: firstOutline ? courseFromOutline(firstOutline, department, courseNumber, termId, fetchedAt) : undefined,
     sections: fulfilled.map(({ result, section }) =>
-      sectionFromOutline(result.value, year, term, department, courseNumber, section)
+      sectionFromOutline(result.value, year, term, department, courseNumber, section, fetchedAt)
     )
   };
 }
