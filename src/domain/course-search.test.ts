@@ -52,6 +52,33 @@ const courses: Course[] = [
     units: 3,
     source: "seed",
     historicalOfferings: ["2026-fall"]
+  },
+  {
+    id: "CMPT 405",
+    subject: "CMPT",
+    number: "405",
+    title: "Design And Analysis Of Computing Algorithms",
+    units: 3,
+    source: "seed",
+    historicalOfferings: ["2027-spring"]
+  },
+  {
+    id: "MATH 232",
+    subject: "MATH",
+    number: "232",
+    title: "Applied Linear Algebra",
+    units: 3,
+    source: "seed",
+    historicalOfferings: ["2027-spring"]
+  },
+  {
+    id: "ENSC 351",
+    subject: "ENSC",
+    number: "351",
+    title: "Embedded And Real Time System Software",
+    units: 3,
+    source: "seed",
+    historicalOfferings: ["2026-fall"]
   }
 ];
 
@@ -84,12 +111,21 @@ describe("course search helpers", () => {
     expect(parseCourseSearchQuery("mse3")).toMatchObject({ subject: "MSE", numberPrefix: "3" });
     expect(parseCourseSearchQuery("CMPT 22")).toMatchObject({ subject: "CMPT", numberPrefix: "22" });
     expect(parseCourseSearchQuery("math")).toMatchObject({ subject: "MATH", numberPrefix: undefined });
+    expect(parseCourseSearchQuery("4")).toMatchObject({ subject: undefined, numberPrefix: "4" });
+    expect(parseCourseSearchQuery("105W")).toMatchObject({ subject: undefined, numberPrefix: "105W" });
+    expect(parseCourseSearchQuery("ca 149")).toMatchObject({ subject: "CA", numberPrefix: "149" });
   });
 
   it("finds subject and number-prefix matches", () => {
     expect(findMatchingCourses("MSE 3", courses).map((result) => result.course.id)).toEqual(["MSE 312"]);
     expect(findMatchingCourses("CMPT 22", courses).map((result) => result.course.id)).toEqual(["CMPT 225"]);
     expect(findMatchingCourses("MSE 4", courses).map((result) => result.course.id)).toEqual([
+      "MSE 402",
+      "MSE 410",
+      "MSE 413"
+    ]);
+    expect(findMatchingCourses("4", courses).map((result) => result.course.id)).toEqual([
+      "CMPT 405",
       "MSE 402",
       "MSE 410",
       "MSE 413"
@@ -106,6 +142,26 @@ describe("course search helpers", () => {
       "MSE 402",
       "MSE 413"
     ]);
+    expect(
+      findMatchingCourses({ ...parseCourseSearchQuery("4"), offeredIn: "2027-spring" }, courses).map(
+        (result) => result.course.id
+      )
+    ).toEqual(["CMPT 405", "MSE 402", "MSE 413"]);
+    expect(
+      findMatchingCourses({ ...parseCourseSearchQuery("cmpt"), offeredIn: "2027-spring" }, courses).map(
+        (result) => result.course.id
+      )
+    ).toEqual(["CMPT 405"]);
+    expect(
+      findMatchingCourses({ ...parseCourseSearchQuery("math 2"), offeredIn: "2027-spring" }, courses).map(
+        (result) => result.course.id
+      )
+    ).toEqual(["MATH 232"]);
+    expect(
+      findMatchingCourses({ ...parseCourseSearchQuery("ensc"), offeredIn: "2027-spring" }, courses).map(
+        (result) => result.course.id
+      )
+    ).toEqual([]);
     expect(findMatchingCourses("MSE 4", courses).map((result) => result.course.id)).toEqual([
       "MSE 402",
       "MSE 410",
