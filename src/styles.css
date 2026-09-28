@@ -256,7 +256,31 @@ code {
 
 .course-combobox {
   position: relative;
-  width: min(34rem, 100%);
+  width: min(42rem, 100%);
+}
+
+.search-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.55rem;
+}
+
+.search-controls .search-box {
+  flex: 1 1 14rem;
+}
+
+.semester-filter {
+  display: grid;
+  gap: 0.25rem;
+  flex: 1 1 12rem;
+  max-width: 16rem;
+}
+
+.search-status {
+  margin: 0.4rem 0 0;
+  color: var(--text-soft);
+  font-size: 0.8rem;
 }
 
 .course-combobox.inline {
@@ -987,5 +1011,10 @@ code {
 
   .search-box {
     min-width: 0;
+  }
+
+  .semester-filter {
+    max-width: none;
+    flex: 1 0 100%;
   }
 }

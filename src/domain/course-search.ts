@@ -7,6 +7,7 @@ export interface CourseSearchQuery {
   subject?: string;
   numberPrefix?: string;
   normalizedText: string;
+  offeredIn?: TermId;
 }
 
 export interface CourseSearchResult {
@@ -56,7 +57,9 @@ export function findMatchingCourses(query: string | CourseSearchQuery, courses: 
         : true;
       const fullText = `${course.id} ${course.title}`.toUpperCase();
       const textMatch = fullText.includes(parsed.normalizedText);
-      return parsed.subject ? matchesSubject && matchesNumberPrefix : textMatch;
+      const matchesQuery = parsed.subject ? matchesSubject && matchesNumberPrefix : textMatch;
+      const matchesOffering = parsed.offeredIn ? course.historicalOfferings.includes(parsed.offeredIn) : true;
+      return matchesQuery && matchesOffering;
     })
     .map((course) => ({
       course,

@@ -41,7 +41,7 @@ import {
   parseImportedPlannerLayoutExport,
   plannerLayoutExportType
 } from "./domain/schemas";
-import { compareTermIds, parseTermId, reconcilePlanningRange, termLabel } from "./domain/terms";
+import { compareTermIds, makeTermId, nextTermId, parseTermId, reconcilePlanningRange, termLabel } from "./domain/terms";
 import { generateWarnings } from "./domain/warnings";
 import {
   fetchSfuCourseNumbersForSubject,
@@ -129,6 +129,19 @@ function sfuCourseNumber(item: SfuListItem): string | undefined {
 function sfuCourseTitle(item: SfuListItem, number: string): string {
   const title = item.title ?? item.text ?? "";
   return title.replace(number, "").replace(/^[-:\s]+/, "").trim();
+}
+
+function catalogSearchTerms(
+  data: AppData,
+  plan: PlanVersion,
+  offeredIn?: TermId
+): Array<{ year: number; season: TermSeason; termId: TermId }> {
+  if (offeredIn) {
+    const parsed = parseTermId(offeredIn);
+    return [{ year: parsed.year, season: parsed.season, termId: offeredIn }];
+  }
+
+  return sfuCatalogSearchTerms(data, plan);
 }
 
 function sfuCatalogSearchTerms(data: AppData, plan: PlanVersion): Array<{ year: number; season: TermSeason; termId: TermId }> {
@@ -579,6 +592,7 @@ export default function App() {
   const [data, setData] = useState<AppData | null>(null);
   const [loadError, setLoadError] = useState("");
   const [courseQuery, setCourseQuery] = useState("");
+  const [offeringFilter, setOfferingFilter] = useState<TermId | "">("");
   const [plannerSearchOpen, setPlannerSearchOpen] = useState(false);
   const [placementPreviewCourseId, setPlacementPreviewCourseId] = useState<string | null>(null);
   const [plannerSearchStatus, setPlannerSearchStatus] = useState("");
@@ -594,6 +608,7 @@ export default function App() {
   const [courseDetailError, setCourseDetailError] = useState("");
   const didLoad = useRef(false);
   const fetchedCatalogKeys = useRef(new Set<string>());
+  const catalogStatusKey = useRef("");
   const fetchedDetailKeys = useRef(new Set<string>());
   const plannerComboboxRef = useRef<HTMLDivElement>(null);
   const completedComboboxRef = useRef<HTMLDivElement>(null);
@@ -671,9 +686,16 @@ export default function App() {
   }, [data]);
 
   const parsedCourseQuery = useMemo(() => parseCourseSearchQuery(courseQuery), [courseQuery]);
+  const plannerSearchQuery = useMemo(
+    () => ({
+      ...parsedCourseQuery,
+      offeredIn: offeringFilter || undefined
+    }),
+    [offeringFilter, parsedCourseQuery]
+  );
   const plannerSearchResults = useMemo(() => {
-    return findMatchingCourses(parsedCourseQuery, data?.courses ?? []).slice(0, 18);
-  }, [data?.courses, parsedCourseQuery]);
+    return findMatchingCourses(plannerSearchQuery, data?.courses ?? []).slice(0, 18);
+  }, [data?.courses, plannerSearchQuery]);
   const completedSearchResults = useMemo(() => {
     return findMatchingCourses(completedQuery, data?.courses ?? []).slice(0, 10);
   }, [completedQuery, data?.courses]);
@@ -696,16 +718,27 @@ export default function App() {
     }
 
     const subject = parsedCourseQuery.subject;
-    const terms = sfuCatalogSearchTerms(data, computed.plan);
+    const offeredIn = offeringFilter || undefined;
+    const terms = catalogSearchTerms(data, computed.plan, offeredIn);
     const cacheKey = `${subject}|${terms.map((term) => term.termId).join(",")}`;
     if (fetchedCatalogKeys.current.has(cacheKey)) {
+      if (catalogStatusKey.current !== cacheKey) {
+        catalogStatusKey.current = cacheKey;
+        setPlannerSearchStatus(
+          offeredIn
+            ? `Showing ${subject} courses offered in ${termLabel(offeredIn)}.`
+            : `Showing ${subject} courses from all terms.`
+        );
+      }
       return;
     }
     fetchedCatalogKeys.current.add(cacheKey);
+    catalogStatusKey.current = cacheKey;
     let cancelled = false;
+    const termNote = offeredIn ? ` For ${termLabel(offeredIn)}` : "";
 
     const handle = window.setTimeout(() => {
-      setPlannerSearchStatus(`Searching SFU For ${subject}...`);
+      setPlannerSearchStatus(`Searching SFU For ${subject}${termNote}...`);
       void Promise.allSettled(
         terms.map(async (term) => {
           const items = await fetchSfuCourseNumbersForSubject(term.year, term.season, subject);
@@ -728,7 +761,7 @@ export default function App() {
           result.status === "fulfilled" ? result.value : []
         );
         if (found.length === 0) {
-          setPlannerSearchStatus("No Additional SFU Courses Found.");
+          setPlannerSearchStatus(`No Additional SFU Courses Found${termNote}.`);
           return;
         }
 
@@ -743,7 +776,9 @@ export default function App() {
           });
           return { ...current, courses: [...byId.values()].sort((a, b) => a.id.localeCompare(b.id)) };
         });
-        setPlannerSearchStatus(`Found ${found.length} SFU Offering Match${found.length === 1 ? "" : "es"}.`);
+        setPlannerSearchStatus(
+          `Found ${found.length} SFU Offering Match${found.length === 1 ? "" : "es"}${termNote}.`
+        );
       });
     }, 350);
 
@@ -751,7 +786,7 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [computed, data, parsedCourseQuery.subject]);
+  }, [computed, data, offeringFilter, parsedCourseQuery.subject]);
 
   if (loadError) {
     return <main className="loading-screen">Could Not Load Planner Data: {loadError}</main>;
@@ -763,6 +798,12 @@ export default function App() {
 
   const currentData = data;
   const plan = computed.plan;
+  const currentTermId = makeTermId(data.settings.currentYear, data.settings.currentSeason);
+  const nextSemesterId = nextTermId(currentTermId);
+  const pinnedOfferingIds = new Set<TermId>([currentTermId, nextSemesterId]);
+  const extraOfferingTerms = [...plan.degreePlan.terms]
+    .filter((term) => !pinnedOfferingIds.has(term.id))
+    .sort((left, right) => compareTermIds(left.id, right.id));
   const selectedTermId = data.settings.selectedTermId;
   const selectedTerm =
     plan.degreePlan.terms.find((term) => term.id === selectedTermId) ?? plan.degreePlan.terms[0];
@@ -1520,33 +1561,56 @@ export default function App() {
                 <p className="board-subtitle">Search for a course, preview possible terms, and place it in your plan</p>
               </div>
               <div className="course-combobox" ref={plannerComboboxRef}>
-                <label className="search-box">
-                  <Search size={17} />
-                  <input
-                    aria-label="Search Courses"
-                    placeholder="Search"
-                    value={courseQuery}
-                    onFocus={() => setPlannerSearchOpen(Boolean(courseQuery.trim()))}
-                    onChange={(event) => {
-                      setCourseQuery(event.target.value);
-                      setPlacementPreviewCourseId(null);
-                      setPlannerSearchOpen(Boolean(event.target.value.trim()));
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter") {
-                        return;
-                      }
-                      const match = exactCourseMatch(courseQuery, data.courses);
-                      if (!match) {
-                        return;
-                      }
-                      event.preventDefault();
-                      setPlacementPreviewCourseId(match.id);
-                      setCourseQuery("");
-                      setPlannerSearchOpen(false);
-                    }}
-                  />
-                </label>
+                <div className="search-controls">
+                  <label className="search-box">
+                    <Search size={17} />
+                    <input
+                      aria-label="Search Courses"
+                      placeholder="Search"
+                      value={courseQuery}
+                      onFocus={() => setPlannerSearchOpen(Boolean(courseQuery.trim()))}
+                      onChange={(event) => {
+                        setCourseQuery(event.target.value);
+                        setPlacementPreviewCourseId(null);
+                        setPlannerSearchOpen(Boolean(event.target.value.trim()));
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") {
+                          return;
+                        }
+                        const match = exactCourseMatch(courseQuery, data.courses);
+                        if (!match || (offeringFilter && !match.historicalOfferings.includes(offeringFilter))) {
+                          return;
+                        }
+                        event.preventDefault();
+                        setPlacementPreviewCourseId(match.id);
+                        setCourseQuery("");
+                        setPlannerSearchOpen(false);
+                      }}
+                    />
+                  </label>
+                  <label className="semester-filter">
+                    Semester
+                    <select
+                      aria-label="Semester offering"
+                      value={offeringFilter}
+                      onChange={(event) => {
+                        setOfferingFilter(event.target.value as TermId | "");
+                        setPlannerSearchOpen(Boolean(courseQuery.trim()));
+                      }}
+                    >
+                      <option value="">All terms</option>
+                      <option value={nextSemesterId}>Next semester ({termLabel(nextSemesterId)})</option>
+                      <option value={currentTermId}>This semester ({termLabel(currentTermId)})</option>
+                      {extraOfferingTerms.map((term) => (
+                        <option key={term.id} value={term.id}>
+                          {termLabel(term.id)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {plannerSearchStatus ? <p className="search-status">{plannerSearchStatus}</p> : null}
                 {courseQuery.trim() && plannerSearchOpen ? (
                   <div className="combobox-menu" role="listbox" aria-label="Course Search Results">
                     {plannerSearchResults.map(({ course }) => (
@@ -1567,12 +1631,22 @@ export default function App() {
                         <span className="result-badges">
                           <em>{course.units} Units</em>
                           <em>{course.prerequisitesText ? "Prerequisites" : "Prerequisites Unknown"}</em>
-                          <em>{course.historicalOfferings.length ? "Offering Data" : "No Offering Data"}</em>
+                          <em>
+                            {offeringFilter
+                              ? termLabel(offeringFilter)
+                              : course.historicalOfferings.length
+                                ? "Offering Data"
+                                : "No Offering Data"}
+                          </em>
                         </span>
                       </button>
                     ))}
                     {plannerSearchResults.length === 0 ? (
-                      <p className="empty-state">No Matching Courses Yet.</p>
+                      <p className="empty-state">
+                        {offeringFilter
+                          ? `No Courses Offered In ${termLabel(offeringFilter)} Match This Search.`
+                          : "No Matching Courses Yet."}
+                      </p>
                     ) : null}
                   </div>
                 ) : null}

@@ -18,13 +18,31 @@ const courses: Course[] = [
     historicalOfferings: ["2025-fall", "2026-fall"]
   },
   {
+    id: "MSE 402",
+    subject: "MSE",
+    number: "402",
+    title: "Engineering Ethics",
+    units: 3,
+    source: "seed",
+    historicalOfferings: ["2027-spring"]
+  },
+  {
     id: "MSE 410",
     subject: "MSE",
     number: "410",
     title: "Failure Analysis",
     units: 3,
     source: "seed",
-    historicalOfferings: []
+    historicalOfferings: ["2026-fall"]
+  },
+  {
+    id: "MSE 413",
+    subject: "MSE",
+    number: "413",
+    title: "Machine Learning In Mechatronics",
+    units: 3,
+    source: "seed",
+    historicalOfferings: ["2026-fall", "2027-spring"]
   },
   {
     id: "CMPT 225",
@@ -71,6 +89,28 @@ describe("course search helpers", () => {
   it("finds subject and number-prefix matches", () => {
     expect(findMatchingCourses("MSE 3", courses).map((result) => result.course.id)).toEqual(["MSE 312"]);
     expect(findMatchingCourses("CMPT 22", courses).map((result) => result.course.id)).toEqual(["CMPT 225"]);
+    expect(findMatchingCourses("MSE 4", courses).map((result) => result.course.id)).toEqual([
+      "MSE 402",
+      "MSE 410",
+      "MSE 413"
+    ]);
+  });
+
+  it("limits prefix matches to a published semester", () => {
+    const spring2027 = {
+      ...parseCourseSearchQuery("MSE 4"),
+      offeredIn: "2027-spring" as const
+    };
+
+    expect(findMatchingCourses(spring2027, courses).map((result) => result.course.id)).toEqual([
+      "MSE 402",
+      "MSE 413"
+    ]);
+    expect(findMatchingCourses("MSE 4", courses).map((result) => result.course.id)).toEqual([
+      "MSE 402",
+      "MSE 410",
+      "MSE 413"
+    ]);
   });
 
   it("extracts course codes from messy pasted text", () => {
