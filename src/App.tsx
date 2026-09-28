@@ -41,11 +41,13 @@ import {
   parseImportedPlannerLayoutExport,
   plannerLayoutExportType
 } from "./domain/schemas";
-import { compareTermIds, parseTermId, reconcilePlanningRange, termLabel } from "./domain/terms";
+import { collectTermCatalogCourses } from "./domain/term-catalog";
+import { compareTermIds, makeTermId, nextTermId, parseTermId, reconcilePlanningRange, termLabel } from "./domain/terms";
 import { generateWarnings } from "./domain/warnings";
 import {
   fetchSfuCourseNumbersForSubject,
   fetchSfuCourseWithSections,
+  getSfuDepartments,
   type SfuListItem
 } from "./services/sfuApi";
 import { clearAllPlannerData, loadAppData, saveAppData } from "./storage/database";
@@ -129,6 +131,19 @@ function sfuCourseNumber(item: SfuListItem): string | undefined {
 function sfuCourseTitle(item: SfuListItem, number: string): string {
   const title = item.title ?? item.text ?? "";
   return title.replace(number, "").replace(/^[-:\s]+/, "").trim();
+}
+
+function catalogSearchTerms(
+  data: AppData,
+  plan: PlanVersion,
+  offeredIn?: TermId
+): Array<{ year: number; season: TermSeason; termId: TermId }> {
+  if (offeredIn) {
+    const parsed = parseTermId(offeredIn);
+    return [{ year: parsed.year, season: parsed.season, termId: offeredIn }];
+  }
+
+  return sfuCatalogSearchTerms(data, plan);
 }
 
 function sfuCatalogSearchTerms(data: AppData, plan: PlanVersion): Array<{ year: number; season: TermSeason; termId: TermId }> {
@@ -579,6 +594,7 @@ export default function App() {
   const [data, setData] = useState<AppData | null>(null);
   const [loadError, setLoadError] = useState("");
   const [courseQuery, setCourseQuery] = useState("");
+  const [offeringFilter, setOfferingFilter] = useState<TermId | "">("");
   const [plannerSearchOpen, setPlannerSearchOpen] = useState(false);
   const [placementPreviewCourseId, setPlacementPreviewCourseId] = useState<string | null>(null);
   const [plannerSearchStatus, setPlannerSearchStatus] = useState("");
@@ -594,6 +610,10 @@ export default function App() {
   const [courseDetailError, setCourseDetailError] = useState("");
   const didLoad = useRef(false);
   const fetchedCatalogKeys = useRef(new Set<string>());
+  const catalogStatusKey = useRef("");
+  const dataRef = useRef<AppData | null>(null);
+  const planRef = useRef<PlanVersion | null>(null);
+  const searchSubjectRef = useRef<string | undefined>(undefined);
   const fetchedDetailKeys = useRef(new Set<string>());
   const plannerComboboxRef = useRef<HTMLDivElement>(null);
   const completedComboboxRef = useRef<HTMLDivElement>(null);
@@ -671,9 +691,16 @@ export default function App() {
   }, [data]);
 
   const parsedCourseQuery = useMemo(() => parseCourseSearchQuery(courseQuery), [courseQuery]);
+  const plannerSearchQuery = useMemo(
+    () => ({
+      ...parsedCourseQuery,
+      offeredIn: offeringFilter || undefined
+    }),
+    [offeringFilter, parsedCourseQuery]
+  );
   const plannerSearchResults = useMemo(() => {
-    return findMatchingCourses(parsedCourseQuery, data?.courses ?? []).slice(0, 18);
-  }, [data?.courses, parsedCourseQuery]);
+    return findMatchingCourses(plannerSearchQuery, data?.courses ?? []).slice(0, 40);
+  }, [data?.courses, plannerSearchQuery]);
   const completedSearchResults = useMemo(() => {
     return findMatchingCourses(completedQuery, data?.courses ?? []).slice(0, 10);
   }, [completedQuery, data?.courses]);
@@ -690,22 +717,54 @@ export default function App() {
     return getPossiblePlacements(previewCourse, computed.plan.degreePlan.terms);
   }, [computed, previewCourse]);
 
+  dataRef.current = data;
+  planRef.current = computed?.plan ?? null;
+  searchSubjectRef.current = parsedCourseQuery.subject;
+
+  function mergeFoundCourses(found: Course[]) {
+    if (found.length === 0) {
+      return;
+    }
+    setData((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const byId = new Map(current.courses.map((course) => [course.id, course]));
+      found.forEach((course) => {
+        byId.set(course.id, mergeCourse(byId.get(course.id), course));
+      });
+      return { ...current, courses: [...byId.values()].sort((a, b) => a.id.localeCompare(b.id)) };
+    });
+  }
+
   useEffect(() => {
-    if (!data || !computed || !parsedCourseQuery.subject || parsedCourseQuery.subject.length < 2) {
+    const currentData = dataRef.current;
+    const currentPlan = planRef.current;
+    if (!currentData || !currentPlan || !parsedCourseQuery.subject || parsedCourseQuery.subject.length < 2) {
       return;
     }
 
     const subject = parsedCourseQuery.subject;
-    const terms = sfuCatalogSearchTerms(data, computed.plan);
+    const offeredIn = offeringFilter || undefined;
+    const terms = catalogSearchTerms(currentData, currentPlan, offeredIn);
     const cacheKey = `${subject}|${terms.map((term) => term.termId).join(",")}`;
     if (fetchedCatalogKeys.current.has(cacheKey)) {
+      if (!offeredIn && catalogStatusKey.current !== cacheKey) {
+        catalogStatusKey.current = cacheKey;
+        setPlannerSearchStatus(`Showing ${subject} courses from all terms.`);
+      }
       return;
     }
     fetchedCatalogKeys.current.add(cacheKey);
+    catalogStatusKey.current = cacheKey;
     let cancelled = false;
+    const termNote = offeredIn ? ` For ${termLabel(offeredIn)}` : "";
 
     const handle = window.setTimeout(() => {
-      setPlannerSearchStatus(`Searching SFU For ${subject}...`);
+      if (!offeredIn) {
+        setPlannerSearchStatus(`Searching SFU For ${subject}...`);
+      }
       void Promise.allSettled(
         terms.map(async (term) => {
           const items = await fetchSfuCourseNumbersForSubject(term.year, term.season, subject);
@@ -728,22 +787,18 @@ export default function App() {
           result.status === "fulfilled" ? result.value : []
         );
         if (found.length === 0) {
-          setPlannerSearchStatus("No Additional SFU Courses Found.");
+          if (!offeredIn) {
+            setPlannerSearchStatus("No Additional SFU Courses Found.");
+          }
           return;
         }
 
-        setData((current) => {
-          if (!current) {
-            return current;
-          }
-
-          const byId = new Map(current.courses.map((course) => [course.id, course]));
-          found.forEach((course) => {
-            byId.set(course.id, mergeCourse(byId.get(course.id), course));
-          });
-          return { ...current, courses: [...byId.values()].sort((a, b) => a.id.localeCompare(b.id)) };
-        });
-        setPlannerSearchStatus(`Found ${found.length} SFU Offering Match${found.length === 1 ? "" : "es"}.`);
+        mergeFoundCourses(found);
+        if (!offeredIn) {
+          setPlannerSearchStatus(`Found ${found.length} SFU Offering Match${found.length === 1 ? "" : "es"}.`);
+        } else {
+          setPlannerSearchStatus(`Found ${subject} courses offered${termNote}.`);
+        }
       });
     }, 350);
 
@@ -751,7 +806,72 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [computed, data, parsedCourseQuery.subject]);
+  }, [offeringFilter, parsedCourseQuery.subject]);
+
+  useEffect(() => {
+    const offeredIn = offeringFilter || undefined;
+    if (!offeredIn) {
+      return;
+    }
+
+    const cacheKey = `all-subjects|${offeredIn}`;
+    if (fetchedCatalogKeys.current.has(cacheKey)) {
+      return;
+    }
+    fetchedCatalogKeys.current.add(cacheKey);
+    const { year, season } = parseTermId(offeredIn);
+    let cancelled = false;
+    let finished = false;
+    const label = termLabel(offeredIn);
+
+    const handle = window.setTimeout(() => {
+      setPlannerSearchStatus(`Searching every SFU subject for ${label}...`);
+      void getSfuDepartments(year, season)
+        .then((departments) =>
+          collectTermCatalogCourses(
+            departments,
+            (department) => fetchSfuCourseNumbersForSubject(year, season, department),
+            offeredIn,
+            {
+              prioritySubject: searchSubjectRef.current,
+              isCancelled: () => cancelled,
+              onBatch: (courses, progress) => {
+                if (cancelled) {
+                  return;
+                }
+                mergeFoundCourses(courses);
+                const complete = progress.total > 0 && progress.done >= progress.total;
+                if (complete) {
+                  finished = true;
+                }
+                setPlannerSearchStatus(
+                  complete
+                    ? `Loaded SFU courses offered in ${label}.`
+                    : `Searching SFU subjects (${progress.done}/${progress.total}) for ${label}...`
+                );
+              }
+            }
+          )
+        )
+        .then(() => {
+          finished = true;
+        })
+        .catch(() => {
+          fetchedCatalogKeys.current.delete(cacheKey);
+          if (!cancelled) {
+            setPlannerSearchStatus(`Could not load every subject for ${label}.`);
+          }
+        });
+    }, 200);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+      if (!finished) {
+        fetchedCatalogKeys.current.delete(cacheKey);
+      }
+    };
+  }, [offeringFilter]);
 
   if (loadError) {
     return <main className="loading-screen">Could Not Load Planner Data: {loadError}</main>;
@@ -763,6 +883,12 @@ export default function App() {
 
   const currentData = data;
   const plan = computed.plan;
+  const currentTermId = makeTermId(data.settings.currentYear, data.settings.currentSeason);
+  const nextSemesterId = nextTermId(currentTermId);
+  const pinnedOfferingIds = new Set<TermId>([currentTermId, nextSemesterId]);
+  const extraOfferingTerms = [...plan.degreePlan.terms]
+    .filter((term) => !pinnedOfferingIds.has(term.id))
+    .sort((left, right) => compareTermIds(left.id, right.id));
   const selectedTermId = data.settings.selectedTermId;
   const selectedTerm =
     plan.degreePlan.terms.find((term) => term.id === selectedTermId) ?? plan.degreePlan.terms[0];
@@ -1520,33 +1646,56 @@ export default function App() {
                 <p className="board-subtitle">Search for a course, preview possible terms, and place it in your plan</p>
               </div>
               <div className="course-combobox" ref={plannerComboboxRef}>
-                <label className="search-box">
-                  <Search size={17} />
-                  <input
-                    aria-label="Search Courses"
-                    placeholder="Search"
-                    value={courseQuery}
-                    onFocus={() => setPlannerSearchOpen(Boolean(courseQuery.trim()))}
-                    onChange={(event) => {
-                      setCourseQuery(event.target.value);
-                      setPlacementPreviewCourseId(null);
-                      setPlannerSearchOpen(Boolean(event.target.value.trim()));
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter") {
-                        return;
-                      }
-                      const match = exactCourseMatch(courseQuery, data.courses);
-                      if (!match) {
-                        return;
-                      }
-                      event.preventDefault();
-                      setPlacementPreviewCourseId(match.id);
-                      setCourseQuery("");
-                      setPlannerSearchOpen(false);
-                    }}
-                  />
-                </label>
+                <div className="search-controls">
+                  <label className="search-box">
+                    <Search size={17} />
+                    <input
+                      aria-label="Search Courses"
+                      placeholder="Search any subject"
+                      value={courseQuery}
+                      onFocus={() => setPlannerSearchOpen(Boolean(courseQuery.trim()))}
+                      onChange={(event) => {
+                        setCourseQuery(event.target.value);
+                        setPlacementPreviewCourseId(null);
+                        setPlannerSearchOpen(Boolean(event.target.value.trim()));
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter") {
+                          return;
+                        }
+                        const match = exactCourseMatch(courseQuery, data.courses);
+                        if (!match || (offeringFilter && !match.historicalOfferings.includes(offeringFilter))) {
+                          return;
+                        }
+                        event.preventDefault();
+                        setPlacementPreviewCourseId(match.id);
+                        setCourseQuery("");
+                        setPlannerSearchOpen(false);
+                      }}
+                    />
+                  </label>
+                  <label className="semester-filter">
+                    Semester
+                    <select
+                      aria-label="Semester offering"
+                      value={offeringFilter}
+                      onChange={(event) => {
+                        setOfferingFilter(event.target.value as TermId | "");
+                        setPlannerSearchOpen(Boolean(courseQuery.trim()));
+                      }}
+                    >
+                      <option value="">All terms</option>
+                      <option value={nextSemesterId}>Next semester ({termLabel(nextSemesterId)})</option>
+                      <option value={currentTermId}>This semester ({termLabel(currentTermId)})</option>
+                      {extraOfferingTerms.map((term) => (
+                        <option key={term.id} value={term.id}>
+                          {termLabel(term.id)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {plannerSearchStatus ? <p className="search-status">{plannerSearchStatus}</p> : null}
                 {courseQuery.trim() && plannerSearchOpen ? (
                   <div className="combobox-menu" role="listbox" aria-label="Course Search Results">
                     {plannerSearchResults.map(({ course }) => (
@@ -1567,12 +1716,22 @@ export default function App() {
                         <span className="result-badges">
                           <em>{course.units} Units</em>
                           <em>{course.prerequisitesText ? "Prerequisites" : "Prerequisites Unknown"}</em>
-                          <em>{course.historicalOfferings.length ? "Offering Data" : "No Offering Data"}</em>
+                          <em>
+                            {offeringFilter
+                              ? termLabel(offeringFilter)
+                              : course.historicalOfferings.length
+                                ? "Offering Data"
+                                : "No Offering Data"}
+                          </em>
                         </span>
                       </button>
                     ))}
                     {plannerSearchResults.length === 0 ? (
-                      <p className="empty-state">No Matching Courses Yet.</p>
+                      <p className="empty-state">
+                        {offeringFilter
+                          ? `No Courses Offered In ${termLabel(offeringFilter)} Match This Search.`
+                          : "No Matching Courses Yet."}
+                      </p>
                     ) : null}
                   </div>
                 ) : null}

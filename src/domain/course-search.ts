@@ -7,6 +7,7 @@ export interface CourseSearchQuery {
   subject?: string;
   numberPrefix?: string;
   normalizedText: string;
+  offeredIn?: TermId;
 }
 
 export interface CourseSearchResult {
@@ -32,11 +33,12 @@ export function parseCourseSearchQuery(query: string): CourseSearchQuery {
 
   const subject = compactMatch?.[1] ?? spacedMatch?.[1];
   const numberPrefix = compactMatch?.[2] ?? spacedMatch?.[2];
+  const numberOnly = !subject ? normalizedText.match(/^([0-9]{1,3}[A-Z]?)$/)?.[1] : undefined;
 
   return {
     raw,
     subject,
-    numberPrefix: numberPrefix || undefined,
+    numberPrefix: numberPrefix || numberOnly || undefined,
     normalizedText
   };
 }
@@ -56,7 +58,16 @@ export function findMatchingCourses(query: string | CourseSearchQuery, courses: 
         : true;
       const fullText = `${course.id} ${course.title}`.toUpperCase();
       const textMatch = fullText.includes(parsed.normalizedText);
-      return parsed.subject ? matchesSubject && matchesNumberPrefix : textMatch;
+      const matchesAnySubjectNumber = parsed.numberPrefix
+        ? course.number.startsWith(parsed.numberPrefix)
+        : false;
+      const matchesQuery = parsed.subject
+        ? matchesSubject && matchesNumberPrefix
+        : parsed.numberPrefix
+          ? matchesAnySubjectNumber
+          : textMatch;
+      const matchesOffering = parsed.offeredIn ? course.historicalOfferings.includes(parsed.offeredIn) : true;
+      return matchesQuery && matchesOffering;
     })
     .map((course) => ({
       course,
